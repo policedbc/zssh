@@ -17,31 +17,33 @@ export interface SSHConnection {
   protocol: 'ssh' | 'sftp' | 'scp' | 'rdp' | 'telnet' | 'serial';
   favorite: boolean;
   status: 'online' | 'offline' | 'unknown';
-  // Port Forwarding
   portForwards: PortForward[];
-  // Connection Settings
   timeout: number;
   keepAliveInterval: number;
   encoding: string;
-  // Startup
   startupCommands: string[];
   envVars: Record<string, string>;
-  // Jump Host
   jumpHost?: string;
   jumpPort?: number;
   jumpUser?: string;
-  // Appearance
   fontSize: number;
   theme: 'default' | 'solarized' | 'monokai' | 'dracula';
-  // RDP specific
   rdpResolution?: string;
   rdpFullScreen?: boolean;
-  // Serial specific
   serialBaudRate?: number;
   serialDataBits?: number;
-  // Connection stats
   totalConnections: number;
   avgSessionTime: number;
+  // Zmodem/ZSSH features
+  zmodemEnabled: boolean;
+  zmodemAutoReceive: boolean;
+  zmodemBufferSize: number;
+  // GitHub integration
+  githubEnabled: boolean;
+  githubToken?: string;
+  githubRepos?: string[];
+  githubDeployKeys?: DeployKey[];
+  githubWebhooks?: Webhook[];
 }
 
 export interface PortForward {
@@ -82,6 +84,53 @@ export interface ConnectionHistory {
   errorMessage?: string;
 }
 
+export interface FileTransfer {
+  id: string;
+  connectionId: string;
+  type: 'upload' | 'download';
+  protocol: 'zmodem' | 'scp' | 'sftp' | 'rsync';
+  localPath: string;
+  remotePath: string;
+  fileSize: number;
+  transferredSize: number;
+  status: 'pending' | 'transferring' | 'completed' | 'failed' | 'cancelled';
+  speed: number;
+  startedAt: number;
+  completedAt?: number;
+  errorMessage?: string;
+}
+
+export interface DeployKey {
+  id: string;
+  title: string;
+  key: string;
+  readOnly: boolean;
+  createdAt: number;
+  lastUsed?: number;
+  repository?: string;
+}
+
+export interface Webhook {
+  id: string;
+  url: string;
+  events: string[];
+  active: boolean;
+  secret?: string;
+  createdAt: number;
+}
+
+export interface GitHubRepo {
+  id: string;
+  name: string;
+  fullName: string;
+  description: string;
+  private: boolean;
+  sshUrl: string;
+  cloneUrl: string;
+  defaultBranch: string;
+  updatedAt: number;
+}
+
 export interface AppSettings {
   theme: 'dark' | 'light';
   defaultPort: number;
@@ -100,6 +149,14 @@ export interface AppSettings {
   proxyHost: string;
   proxyPort: number;
   proxyEnabled: boolean;
+  // Zmodem settings
+  zmodemDefaultPath: string;
+  zmodemAutoAccept: boolean;
+  zmodemMaxConcurrent: number;
+  // GitHub settings
+  githubDefaultOrg: string;
+  githubAutoSync: boolean;
+  githubTokenStorage: 'memory' | 'encrypted' | 'system';
 }
 
 export interface Toast {
@@ -139,6 +196,12 @@ export const DEFAULT_SETTINGS: AppSettings = {
   proxyHost: '',
   proxyPort: 0,
   proxyEnabled: false,
+  zmodemDefaultPath: 'C:\\Users\\%USERNAME%\\Downloads',
+  zmodemAutoAccept: false,
+  zmodemMaxConcurrent: 3,
+  githubDefaultOrg: '',
+  githubAutoSync: false,
+  githubTokenStorage: 'encrypted',
 };
 
 export const CONNECTION_TEMPLATES: Partial<SSHConnection>[] = [
@@ -165,6 +228,9 @@ export const KEYBOARD_SHORTCUTS = [
   { keys: 'Ctrl+Shift+S', action: 'snippets', description: 'Command Snippets' },
   { keys: 'Ctrl+Shift+K', action: 'keygen', description: 'Key Generator' },
   { keys: 'Ctrl+Shift+N', action: 'networkScan', description: 'Network Scanner' },
+  { keys: 'Ctrl+T', action: 'fileTransfer', description: 'File Transfer' },
+  { keys: 'Ctrl+G', action: 'github', description: 'GitHub Integration' },
+  { keys: 'Ctrl+H', action: 'help', description: 'Help & Documentation' },
   { keys: 'Escape', action: 'closeModal', description: 'Close Modal' },
   { keys: 'Ctrl+1-9', action: 'switchGroup', description: 'Switch to Group' },
 ];

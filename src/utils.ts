@@ -29,6 +29,13 @@ export function createDefaultConnection(overrides: Partial<SSHConnection> = {}):
     theme: 'default',
     totalConnections: 0,
     avgSessionTime: 0,
+    zmodemEnabled: true,
+    zmodemAutoReceive: false,
+    zmodemBufferSize: 4096,
+    githubEnabled: false,
+    githubRepos: [],
+    githubDeployKeys: [],
+    githubWebhooks: [],
     ...overrides,
   };
 }
@@ -64,6 +71,29 @@ export function generateSSHCommand(conn: SSHConnection): string {
   if (conn.keepAliveInterval !== 60) cmd += ` -o ServerAliveInterval=${conn.keepAliveInterval}`;
   cmd += ` ${conn.username}@${conn.host}`;
   return cmd;
+}
+
+export function generateSCPCommand(conn: SSHConnection, localPath: string, remotePath: string, direction: 'upload' | 'download'): string {
+  const host = `${conn.username}@${conn.host}`;
+  const portFlag = conn.port !== 22 ? `-P ${conn.port}` : '';
+  const keyFlag = conn.authType === 'key' && conn.keyPath ? `-i "${conn.keyPath}"` : '';
+  if (direction === 'upload') {
+    return `scp ${portFlag} ${keyFlag} "${localPath}" ${host}:${remotePath}`.replace(/\s+/g, ' ').trim();
+  }
+  return `scp ${portFlag} ${keyFlag} ${host}:${remotePath} "${localPath}"`.replace(/\s+/g, ' ').trim();
+}
+
+export function generateRsyncCommand(conn: SSHConnection, localPath: string, remotePath: string, direction: 'upload' | 'download'): string {
+  const host = `${conn.username}@${conn.host}`;
+  const sshCmd = `ssh -p ${conn.port}${conn.authType === 'key' && conn.keyPath ? ` -i "${conn.keyPath}"` : ''}`;
+  if (direction === 'upload') {
+    return `rsync -avz -e "${sshCmd}" "${localPath}" ${host}:${remotePath}`;
+  }
+  return `rsync -avz -e "${sshCmd}" ${host}:${remotePath} "${localPath}"`;
+}
+
+export function generateZmodemCommand(conn: SSHConnection): string {
+  return `ssh -o "Protocol=2" ${conn.username}@${conn.host} -t "rz -be"`;
 }
 
 export function generatePuTTYCommand(conn: SSHConnection): string {
@@ -143,4 +173,24 @@ export function formatDuration(ms: number): string {
 
 export function formatDate(timestamp: number): string {
   return new Date(timestamp).toLocaleString();
+}
+
+export function formatFileSize(bytes: number): string {
+  if (bytes === 0) return '0 B';
+  const k = 1024;
+  const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+}
+
+export function generateGitHubSSHKeyCommand(): string {
+  return 'ssh-keygen -t ed25519 -C "your_email@example.com"';
+}
+
+export function generateGitHubAddKeyCommand(): string {
+  return 'eval "$(ssh-agent -s)"\nssh-add ~/.ssh/id_ed25519\n# Then add the public key to GitHub:\ncat ~/.ssh/id_ed25519.pub';
+}
+
+export function generateGitHubTestCommand(): string {
+  return 'ssh -T git@github.com';
 }
