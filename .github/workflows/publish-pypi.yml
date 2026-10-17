@@ -1,0 +1,69 @@
+name: Publish Python package to PyPI
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    # Releases must be explicitly tagged with the Python package version.
+    if: ${{ startsWith(github.event.release.tag_name, 'v') && !github.event.release.prerelease }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Verify release tag matches package metadata
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          python - <<'PY'
+          import os
+          import pathlib
+          import tomllib
+          version = tomllib.loads(pathlib.Path('pyproject.toml').read_text())['project']['version']
+          expected = 'v' + version
+          actual = os.environ['RELEASE_TAG']
+          if actual != expected:
+              raise SystemExit(f'Refusing to publish: release tag {actual!r} != {expected!r}')
+          PY
+      - name: Build and check distributions
+        run: |
+          python -m pip install --disable-pip-version-check build twine
+          python -m build
+          python -m twine check dist/*.whl dist/*.tar.gz --strict
+      - name: Verify wheel installation and CLI
+        run: |
+          python -m pip install --force-reinstall --no-deps dist/*.whl
+          zssh --help
+      - uses: actions/upload-artifact@v4
+        with:
+          name: python-distributions
+          path: |
+            dist/*.whl
+            dist/*.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish with PyPI OIDC
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/zeaz-zssh/
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: python-distributions
+          path: dist/
+      - name: Publish release
+        uses: pypa/gh-action-pypi-publish@release/v1
