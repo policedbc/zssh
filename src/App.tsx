@@ -103,7 +103,7 @@ export default function App() {
     else if (conn.protocol === 'vnc') cmd = generateVNCCommand(conn, platform);
     else cmd = generateTerminalLaunch(conn, settings);
     navigator.clipboard.writeText(cmd);
-    setHistory(prev => [createHistoryEntry(conn, platform, 'success', Math.random() * 3600000), ...prev].slice(0, 100));
+    // Copying a command is not an authenticated SSH connection; do not fabricate successful history.
     setConnections(prev => prev.map(c => c.id === conn.id ? { ...c, lastConnected: Date.now(), totalConnections: c.totalConnections + 1 } : c));
     addToast('success', 'Connected', `Command copied for ${PLATFORMS[platform].name}`);
   };
@@ -112,9 +112,9 @@ export default function App() {
   const handleToggleFavorite = (id: string) => { setConnections(prev => prev.map(c => c.id === id ? { ...c, favorite: !c.favorite } : c)); };
   const handleCheckStatus = (id: string) => {
     setConnections(prev => prev.map(c => c.id === id ? { ...c, status: 'unknown' } : c));
-    setTimeout(() => { const online = Math.random() > 0.3; setConnections(prev => prev.map(c => c.id === id ? { ...c, status: online ? 'online' : 'offline' } : c)); addToast(online ? 'success' : 'error', 'Status', online ? 'Host reachable' : 'Host unreachable'); }, 1500);
+    addToast('info', 'Status unknown', 'Use the local SSH CLI to check real connectivity; browser-only checks are unavailable.');
   };
-  const handleExport = () => { const data = JSON.stringify({ connections, groups, snippets, settings }, null, 2); const blob = new Blob([data], { type: 'application/json' }); const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = `ssh-manager-${platform}-${new Date().toISOString().split('T')[0]}.json`; a.click(); URL.revokeObjectURL(url); addToast('success', 'Exported', 'Backup downloaded'); };
+  const handleExport = () => { const safeConnections = connections.map(({ password, githubToken, vncPassword, githubWebhooks, ...rest }) => ({ ...rest, githubWebhooks: githubWebhooks.map(({ secret, ...webhook }) => webhook) })); const data = JSON.stringify({ connections: safeConnections, groups, snippets, settings }, null, 2); const blob = new Blob([data], { type: 'application/json' }); const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = `ssh-manager-${platform}-${new Date().toISOString().split('T')[0]}.json`; a.click(); URL.revokeObjectURL(url); addToast('success', 'Exported', 'Backup downloaded'); };
   const handleImport = () => { const input = document.createElement('input'); input.type = 'file'; input.accept = '.json'; input.onchange = (e) => { const file = (e.target as HTMLInputElement).files?.[0]; if (file) { const reader = new FileReader(); reader.onload = (ev) => { try { const data = JSON.parse(ev.target?.result as string); if (data.connections) setConnections(prev => [...prev, ...data.connections.map((c: SSHConnection) => ({ ...c, id: uuidv4() }))]); if (data.groups) setGroups(prev => [...prev, ...data.groups.map((g: ConnectionGroup) => ({ ...g, id: uuidv4() }))]); addToast('success', 'Imported', 'Data imported'); } catch { addToast('error', 'Error', 'Invalid file'); } }; reader.readAsText(file); } }; input.click(); };
   const handleImportSSHConfig = () => { const input = document.createElement('input'); input.type = 'file'; input.onchange = (e) => { const file = (e.target as HTMLInputElement).files?.[0]; if (file) { const reader = new FileReader(); reader.onload = (ev) => { const parsed = parseSSHConfig(ev.target?.result as string, platform); const newConns = parsed.map(p => createDefaultConnection(p, platform)); setConnections(prev => [...prev, ...newConns]); addToast('success', 'Imported', `${newConns.length} hosts`); }; reader.readAsText(file); } }; input.click(); };
   const toggleSelect = (id: string) => { setSelectedIds(prev => { const next = new Set(prev); next.has(id) ? next.delete(id) : next.add(id); return next; }); };
