@@ -24,7 +24,7 @@ class BootstrapTests(unittest.TestCase):
                 Path(cmd[cmd.index("-f")+1]).write_text("private")
                 Path(cmd[cmd.index("-f")+1]+".pub").write_text("public")
                 return subprocess.CompletedProcess(cmd,0)
-            with patch.object(zssh.shutil,"which",return_value="/usr/bin/ssh"),patch.object(zssh.subprocess,"run",side_effect=fake_run) as run:
+            with patch.object(zssh.shutil,"which",return_value="/usr/bin/ssh"),patch.object(zssh.subprocess,"run",side_effect=fake_run) as run, patch.object(zssh,"verify_windows_key_acl"):
                 zssh.bootstrap(d)
                 zssh.bootstrap(d)
                 self.assertEqual(run.call_count,1)

@@ -29,6 +29,24 @@ def ensure_directory(path):
 def key_path(home=None):
     return paths(home)[1] / "id_ed25519"
 
+def verify_windows_key_acl(key):
+    """Fail closed when the Windows key ACL grants access outside trusted principals."""
+    command = [
+        "powershell", "-NoProfile", "-NonInteractive", "-Command",
+        "$ErrorActionPreference='Stop'; "
+        "$p=$args[0]; $acl=Get-Acl -LiteralPath $p; "
+        "$me=[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value; "
+        "$allowed=@($me,'S-1-5-18','S-1-5-32-544'); "
+        "foreach($rule in $acl.Access) { "
+        "  $sid=$rule.IdentityReference.Translate("
+        "    [System.Security.Principal.SecurityIdentifier]).Value; "
+        "  if($rule.AccessControlType -eq 'Allow' -and $sid -notin $allowed) { exit 5 } "
+        "}; exit 0", str(key)
+    ]
+    result = subprocess.run(command, capture_output=True, text=True, check=False)
+    if result.returncode != 0:
+        raise RuntimeError("Unsafe or unverifiable Windows private-key ACL; remediate manually before use")
+
 def bootstrap(home=None, dry_run=False, comment=None):
     ssh, managed, config, hosts = paths(home)
     key = key_path(home)
@@ -52,8 +70,7 @@ def bootstrap(home=None, dry_run=False, comment=None):
         subprocess.run(cmd, check=True)
     lock_down(key)
     if os.name == "nt":
-        # Fail closed until explicit Windows ACL verification is implemented.
-        raise RuntimeError("Windows private-key ACL verification is required before bootstrap can complete")
+        verify_windows_key_acl(key)
     if not hosts.exists():
         hosts.write_text("# Managed by zSSH. Do not store passwords here.\n",encoding="utf-8")
     lock_down(hosts)
