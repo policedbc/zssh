@@ -82,7 +82,7 @@ export default function App() {
   }, [selectedConn, platform]);
 
   const handleSaveConn = (conn: SSHConnection) => {
-    setConnections(prev => { const exists = prev.find(c => c.id === conn.id); if (exists) return prev.map(c => c.id === conn.id ? conn : c); return [...prev, conn]; });
+    setConnections(prev => { const safeConn = { ...conn, password: '', githubToken: '', vncPassword: '', githubWebhooks: conn.githubWebhooks.map(({ secret, ...w }) => w) }; conn = safeConn; const exists = prev.find(c => c.id === conn.id); if (exists) return prev.map(c => c.id === conn.id ? conn : c); return [...prev, conn]; });
     setShowForm(false); setEditingConn(null); setSelectedId(conn.id);
     addToast('success', 'Saved', `Connection "${conn.name}" saved`);
   };
@@ -99,13 +99,15 @@ export default function App() {
   };
   const handleQuickConnect = (conn: SSHConnection) => {
     let cmd = '';
+    try {
     if (conn.protocol === 'rdp') cmd = generateRDPCommand(conn, platform);
     else if (conn.protocol === 'vnc') cmd = generateVNCCommand(conn, platform);
     else cmd = generateTerminalLaunch(conn, settings);
     navigator.clipboard.writeText(cmd);
     // Copying a command is not an authenticated SSH connection; do not fabricate successful history.
     setConnections(prev => prev.map(c => c.id === conn.id ? { ...c, lastConnected: Date.now(), totalConnections: c.totalConnections + 1 } : c));
-    addToast('success', 'Connected', `Command copied for ${PLATFORMS[platform].name}`);
+    addToast('info', 'Command copied', `Command copied for ${PLATFORMS[platform].name}; connection not yet verified`);
+    } catch (error) { addToast('error', 'Invalid connection', error instanceof Error ? error.message : 'Invalid input'); }
   };
   const handleBatchConnect = () => { selectedIds.forEach(id => { const conn = connections.find(c => c.id === id); if (conn) handleQuickConnect(conn); }); addToast('success', 'Batch', `Launched ${selectedIds.size} connections`); setBatchMode(false); setSelectedIds(new Set()); };
   const handleBatchDelete = () => { if (!confirm(`Delete ${selectedIds.size} connections?`)) return; setConnections(prev => prev.filter(c => !selectedIds.has(c.id))); setSelectedIds(new Set()); setBatchMode(false); };

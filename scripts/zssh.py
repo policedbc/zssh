@@ -45,12 +45,15 @@ def bootstrap(home=None, dry_run=False, comment=None):
     ensure_directory(ssh)
     ensure_directory(managed)
     if not key.exists():
-        if (key.with_suffix(".pub")).exists():
+        if Path(str(key)+".pub").exists():
             raise RuntimeError("Public key exists without its private counterpart; refusing overwrite")
         cmd = ["ssh-keygen","-q","-t","ed25519","-a","64","-f",str(key),"-C",comment or ("zssh@" + socket.gethostname())]
         # Interactive passphrase by default: do not set -N "".
         subprocess.run(cmd, check=True)
     lock_down(key)
+    if os.name == "nt":
+        # Fail closed until explicit Windows ACL verification is implemented.
+        raise RuntimeError("Windows private-key ACL verification is required before bootstrap can complete")
     if not hosts.exists():
         hosts.write_text("# Managed by zSSH. Do not store passwords here.\n",encoding="utf-8")
     lock_down(hosts)

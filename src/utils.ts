@@ -84,9 +84,41 @@ export function createHistoryEntry(conn: SSHConnection, platform: Platform, stat
   };
 }
 
+// Reject shell metacharacters before composing commands that users may paste into a shell.
+function safeShellField(value: string, field: string, pattern: RegExp): string {
+  if (!pattern.test(value) || value.startsWith('-')) throw new Error(`Invalid ${field}`);
+  return value;
+}
+function safePort(value: number): number {
+  if (!Number.isInteger(value) || value < 1 || value > 65535) throw new Error('Invalid port');
+  return value;
+}
+function safePath(value: string): string {
+  if (!/^[a-zA-Z0-9_./\\\\: ~-]+$/.test(value) || value.trim().startsWith('-')) throw new Error('Invalid path');
+  return value;
+}
+function validateConnection(conn: SSHConnection): void {
+  safeShellField(conn.host, 'host', /^[a-zA-Z0-9][a-zA-Z0-9.:-]{0,252}$/);
+  safeShellField(conn.username, 'username', /^[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,62}$/);
+  safePort(conn.port);
+  if (conn.keyPath) safePath(conn.keyPath);
+  if (conn.certPath) safePath(conn.certPath);
+  if (conn.jumpHost) safeShellField(conn.jumpHost, 'jump host', /^[a-zA-Z0-9][a-zA-Z0-9.:-]{0,252}$/);
+  if (conn.jumpUser) safeShellField(conn.jumpUser, 'jump user', /^[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,62}$/);
+  if (conn.jumpPort) safePort(conn.jumpPort);
+  for (const pf of conn.portForwards) {
+    safePort(pf.localPort);
+    if (pf.type !== 'dynamic') {
+      safePort(pf.remotePort);
+      safeShellField(pf.remoteHost, 'forward host', /^[a-zA-Z0-9][a-zA-Z0-9.:-]{0,252}$/);
+    }
+  }
+}
+
 // ============ CROSS-PLATFORM SSH COMMANDS ============
 
 export function generateSSHCommand(conn: SSHConnection, platform: Platform = 'windows'): string {
+  validateConnection(conn);
   let cmd = 'ssh';
   if (conn.port !== 22) cmd += ` -p ${conn.port}`;
   if (conn.authType === 'key' && conn.keyPath) cmd += ` -i "${conn.keyPath}"`;
@@ -109,6 +141,8 @@ export function generateSSHCommand(conn: SSHConnection, platform: Platform = 'wi
 // ============ CROSS-PLATFORM TERMINAL LAUNCHERS ============
 
 export function generateTerminalLaunch(conn: SSHConnection, settings: AppSettings): string {
+  validateConnection(conn);
+  safeShellField(conn.name || 'SSH', 'connection name', /^[a-zA-Z0-9_][a-zA-Z0-9_. -]{0,62}$/);
   const sshCmd = generateSSHCommand(conn, settings.platform);
   const platform = settings.platform;
   const terminal = settings.preferredTerminal;
@@ -149,6 +183,9 @@ export function generateTerminalLaunch(conn: SSHConnection, settings: AppSetting
 // ============ CROSS-PLATFORM FILE TRANSFER ============
 
 export function generateSCPCommand(conn: SSHConnection, localPath: string, remotePath: string, direction: 'upload' | 'download', platform: Platform = 'windows'): string {
+  validateConnection(conn);
+  safePath(localPath);
+  safePath(remotePath);
   const host = `${conn.username}@${conn.host}`;
   const portFlag = conn.port !== 22 ? `-P ${conn.port}` : '';
   const keyFlag = conn.authType === 'key' && conn.keyPath ? `-i "${conn.keyPath}"` : '';
@@ -159,6 +196,9 @@ export function generateSCPCommand(conn: SSHConnection, localPath: string, remot
 }
 
 export function generateRsyncCommand(conn: SSHConnection, localPath: string, remotePath: string, direction: 'upload' | 'download', platform: Platform = 'windows'): string {
+  validateConnection(conn);
+  safePath(localPath);
+  safePath(remotePath);
   const host = `${conn.username}@${conn.host}`;
   const sshCmd = `ssh -p ${conn.port}${conn.authType === 'key' && conn.keyPath ? ` -i "${conn.keyPath}"` : ''}`;
   if (direction === 'upload') {
@@ -168,12 +208,14 @@ export function generateRsyncCommand(conn: SSHConnection, localPath: string, rem
 }
 
 export function generateZmodemCommand(conn: SSHConnection): string {
+  validateConnection(conn);
   return `ssh -o "Protocol=2" ${conn.username}@${conn.host} -t "rz -be"`;
 }
 
 // ============ CROSS-PLATFORM RDP/VNC ============
 
 export function generateRDPCommand(conn: SSHConnection, platform: Platform = 'windows'): string {
+  validateConnection(conn);
   switch (platform) {
     case 'windows':
       return `mstsc /v:${conn.host}:${conn.port} /u:${conn.username}`;
@@ -185,6 +227,7 @@ export function generateRDPCommand(conn: SSHConnection, platform: Platform = 'wi
 }
 
 export function generateVNCCommand(conn: SSHConnection, platform: Platform = 'windows'): string {
+  validateConnection(conn);
   const vncUrl = `vnc://${conn.username ? `${conn.username}@` : ''}${conn.host}:${conn.vncPort || 5900}`;
   switch (platform) {
     case 'windows':
@@ -199,6 +242,7 @@ export function generateVNCCommand(conn: SSHConnection, platform: Platform = 'wi
 // ============ CROSS-PLATFORM PUTTY ============
 
 export function generatePuTTYCommand(conn: SSHConnection): string {
+  validateConnection(conn);
   let cmd = 'putty';
   if (conn.port !== 22) cmd += ` -P ${conn.port}`;
   if (conn.authType === 'key' && conn.keyPath) {
@@ -213,6 +257,8 @@ export function generatePuTTYCommand(conn: SSHConnection): string {
 // ============ CROSS-PLATFORM BATCH SCRIPTS ============
 
 export function generateBatchScript(connections: SSHConnection[], platform: Platform = 'windows'): string {
+  connections.forEach(validateConnection);
+  connections.forEach(c => safeShellField(c.name || 'SSH', 'connection name', /^[a-zA-Z0-9_][a-zA-Z0-9_. -]{0,62}$/));
   if (platform === 'windows') {
     let script = '@echo off\r\n';
     script += 'REM Generated by SSH Manager Pro (Windows)\r\n';
@@ -246,6 +292,8 @@ export function generateBatchScript(connections: SSHConnection[], platform: Plat
 }
 
 export function generatePowerShellScript(connections: SSHConnection[], platform: Platform = 'windows'): string {
+  connections.forEach(validateConnection);
+  connections.forEach(c => safeShellField(c.name || 'SSH', 'connection name', /^[a-zA-Z0-9_][a-zA-Z0-9_. -]{0,62}$/));
   if (platform === 'windows') {
     let script = '# Generated by SSH Manager Pro (Windows PowerShell)\r\n';
     script += `# Date: ${new Date().toLocaleDateString()}\r\n\r\n`;
