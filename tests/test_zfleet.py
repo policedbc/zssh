@@ -2,6 +2,7 @@ import contextlib
 import importlib.util
 import io
 import json
+import re
 import sys
 import tempfile
 import unittest
@@ -59,7 +60,7 @@ class FleetTests(unittest.TestCase):
                 zfleet.select(names)
             with self.assertRaises(ValueError):
                 zfleet.select(names, hosts=["missing"])
-            with self.assertRaises(ValueError):
+            with self.assertRaises(re.error):
                 zfleet.select(names, pattern="(", all_hosts=False)
 
     def test_success_failure_timeout_and_real_argv(self):
