@@ -45,6 +45,55 @@ def verify_windows_key_acl(key):
     if result.returncode:
         raise RuntimeError("Windows key ACL is unsafe or cannot be verified")
 
+INCLUDE_LINE = "Include ~/.ssh/zssh/hosts.conf"
+
+def has_include(text):
+    return INCLUDE_LINE in [line.strip() for line in text.splitlines()]
+
+def write_private(path, text):
+    """Atomically replace path, creating the new file with owner-only mode.
+
+    Follows symlinks (dotfile managers) so the link itself is preserved.
+    """
+    target = Path(os.path.realpath(path))
+    tmp = target.with_name(target.name + ".zssh-tmp-" + str(os.getpid()))
+    fd = os.open(str(tmp), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
+            handle.write(text)
+        os.replace(str(tmp), str(target))
+    except BaseException:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
+
+def ssh_quote(path):
+    value = str(path)
+    if any(ch in value for ch in ('"', '\r', '\n', '\0')):
+        raise ValueError("Unsupported character in path")
+    if re.search(r"[\s#]", value):
+        return '"' + value + '"'
+    return value
+
+def mode_is_private(path):
+    if os.name != "posix":
+        return True
+    return (path.stat().st_mode & 0o077) == 0
+
+def is_windows():
+    return os.name == "nt"
+
+def key_is_private(key):
+    if is_windows():
+        try:
+            verify_windows_key_acl(key)
+            return True
+        except (RuntimeError, OSError):
+            return False
+    return mode_is_private(key)
+
 def bootstrap(home=None, dry_run=False, comment=None):
     ssh, managed, config, hosts = paths(home)
     key = key_path(home)
@@ -54,7 +103,7 @@ def bootstrap(home=None, dry_run=False, comment=None):
     if not ssh.is_dir(): changes.append("create ~/.ssh")
     if not managed.is_dir(): changes.append("create ~/.ssh/zssh")
     if not key.exists(): changes.append("generate unique Ed25519 private key")
-    if not config.exists() or "Include ~/.ssh/zssh/hosts.conf" not in config.read_text(encoding="utf-8"):
+    if not config.exists() or not has_include(config.read_text(encoding="utf-8")):
         changes.append("enable managed SSH host include")
     if dry_run:
         return {"status":"dry-run","changes":changes,"key":str(key)}
@@ -70,16 +119,15 @@ def bootstrap(home=None, dry_run=False, comment=None):
     if os.name == "nt":
         verify_windows_key_acl(key)
     if not hosts.exists():
-        hosts.write_text("# Managed by zSSH. Do not store passwords here.\n",encoding="utf-8")
+        write_private(hosts,"# Managed by zSSH. Do not store passwords here.\n")
     lock_down(hosts)
-    include = "Include ~/.ssh/zssh/hosts.conf"
-    if config.exists():
-        existing=config.read_text(encoding="utf-8")
-    else:
-        existing=""
-    if include not in existing.splitlines():
+    existing = config.read_text(encoding="utf-8") if config.exists() else ""
+    if not has_include(existing):
+        backup = Path(str(config) + ".zssh-backup")
+        if existing and not backup.exists():
+            write_private(backup, existing)
         # Include must precede Host * for OpenSSH first-value precedence.
-        config.write_text(include+"\n"+existing,encoding="utf-8")
+        write_private(config, INCLUDE_LINE + "\n" + existing)
     lock_down(config)
     return {"status":"ok","changes":changes,"key":str(key),"public_key":str(key)+".pub"}
 
@@ -96,27 +144,35 @@ def add_host(alias, hostname, user, port=22, home=None, dry_run=False):
     _,managed,_,hosts=paths(home)
     if not hosts.exists(): raise RuntimeError("Run 'init' before adding hosts")
     text=hosts.read_text(encoding="utf-8")
-    if re.search(r"(?im)^Host\s+"+re.escape(alias)+r"\s*$",text):
+    if re.search(r"(?im)^\s*Host\s+(?:\S+\s+)*"+re.escape(alias)+r"(?:\s+\S+)*\s*$",text):
         raise ValueError("Host alias already exists; edit manually")
     block=("\nHost "+alias+"\n  HostName "+hostname+"\n  User "+user+
-           "\n  Port "+str(port)+"\n  IdentityFile "+str(key_path(home))+
+           "\n  Port "+str(port)+"\n  IdentityFile "+ssh_quote(key_path(home))+
            "\n  IdentitiesOnly yes\n  StrictHostKeyChecking yes\n")
     if not dry_run:
-        with hosts.open("a",encoding="utf-8") as f: f.write(block)
+        if text and not text.endswith("\n"): block="\n"+block
+        write_private(hosts, text + block)
         lock_down(hosts)
     return {"status":"dry-run" if dry_run else "ok","alias":alias}
 
 def doctor(home=None, repair=False):
     ssh,managed,config,hosts=paths(home)
     key=key_path(home)
-    checks={"ssh":bool(shutil.which("ssh")),"ssh_keygen":bool(shutil.which("ssh-keygen")),
-      "ssh_dir":ssh.is_dir(),"key":key.is_file(),"public_key":Path(str(key)+".pub").is_file(),
-      "config":config.is_file(),"managed_hosts":hosts.is_file()}
+    def collect():
+        checks={"ssh":bool(shutil.which("ssh")),"ssh_keygen":bool(shutil.which("ssh-keygen")),
+          "ssh_dir":ssh.is_dir(),"key":key.is_file(),"public_key":Path(str(key)+".pub").is_file(),
+          "config":config.is_file(),"managed_hosts":hosts.is_file()}
+        checks["include_enabled"]=config.is_file() and has_include(config.read_text(encoding="utf-8"))
+        checks["key_permissions"]=key.is_file() and key_is_private(key)
+        checks["hosts_permissions"]=hosts.is_file() and mode_is_private(hosts)
+        return checks
+    checks=collect()
     if repair and checks["ssh"] and checks["ssh_keygen"] and checks["key"]:
         ensure_directory(ssh);ensure_directory(managed)
         lock_down(key)
         if hosts.exists():lock_down(hosts)
         if config.exists():lock_down(config)
+        checks=collect()
     return {"healthy":all(checks.values()),"checks":checks}
 
 def main(argv=None):

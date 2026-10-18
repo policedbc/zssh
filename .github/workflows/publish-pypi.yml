@@ -42,6 +42,7 @@ jobs:
         run: |
           python -m pip install --force-reinstall --no-deps dist/*.whl
           zssh --help
+          zfleet --help
       - uses: actions/upload-artifact@v4
         with:
           name: python-distributions

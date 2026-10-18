@@ -1,5 +1,6 @@
 import { SSHConnection, ConnectionHistory, Platform, PLATFORMS, AppSettings } from './types';
 import { v4 as uuidv4 } from 'uuid';
+import { ShellSafetyError, assertHost, assertUser, assertPort, assertRemotePath, assertPackage, assertSeconds, quoteArg, quotePath, safeLabel, safely, ShellPlatform } from './shell';
 
 // Platform detection
 export function detectPlatform(): Platform {
@@ -84,178 +85,193 @@ export function createHistoryEntry(conn: SSHConnection, platform: Platform, stat
   };
 }
 
-function validateSSH(conn: SSHConnection): void {
-  const host = /^[A-Za-z0-9][A-Za-z0-9.:-]{0,252}$/;
-  const user = /^[A-Za-z_][A-Za-z0-9_.-]{0,62}$/;
-  const port = (p: number) => Number.isInteger(p) && p > 0 && p <= 65535;
-  const path = (s: string) => /^[A-Za-z0-9_./\\: ~-]+$/.test(s) && !s.startsWith('-');
-  if (!host.test(conn.host) || !user.test(conn.username) || !port(conn.port)) throw new Error('Unsafe SSH host/user/port');
-  if ((conn.keyPath && !path(conn.keyPath)) || (conn.certPath && !path(conn.certPath))) throw new Error('Unsafe SSH key path');
-  if (conn.jumpHost && !host.test(conn.jumpHost)) throw new Error('Unsafe jump host');
-  if (conn.jumpUser && !user.test(conn.jumpUser)) throw new Error('Unsafe jump user');
-  if (conn.jumpPort && !port(conn.jumpPort)) throw new Error('Unsafe jump port');
-  for (const f of conn.portForwards || []) {
-    if (!port(f.localPort) || (f.type !== 'dynamic' && (!port(f.remotePort) || !host.test(f.remoteHost)))) throw new Error('Unsafe port forward');
-  }
-}
-function validateTransferPath(path: string): void {
-  if (!/^[A-Za-z0-9_./\\: ~-]+$/.test(path) || path.startsWith('-')) throw new Error('Unsafe transfer path');
-}
-function validateName(name: string): void {
-  if (!/^[A-Za-z0-9_][A-Za-z0-9_. -]{0,62}$/.test(name)) throw new Error('Unsafe profile name');
-}
-
 // ============ CROSS-PLATFORM SSH COMMANDS ============
 
-export function generateSSHCommand(conn: SSHConnection, platform: Platform = 'windows'): string {
-  validateSSH(conn);
-  let cmd = 'ssh';
-  if (conn.port !== 22) cmd += ` -p ${conn.port}`;
-  if (conn.authType === 'key' && conn.keyPath) cmd += ` -i "${conn.keyPath}"`;
-  if (conn.authType === 'certificate' && conn.certPath) cmd += ` -o CertificateFile="${conn.certPath}"`;
+function buildSSHCommand(conn: SSHConnection, platform: Platform, nested: boolean): string {
+  const sh: ShellPlatform = platform;
+  const parts = ['ssh'];
+  if (conn.port !== 22) parts.push('-p', String(assertPort(conn.port)));
+  if (conn.authType === 'key' && conn.keyPath) parts.push('-i', quotePath(sh, conn.keyPath, nested));
+  if (conn.authType === 'certificate' && conn.certPath) {
+    const cert = quoteArg(sh, 'CertificateFile=' + conn.certPath, nested);
+    parts.push('-o', cert);
+  }
   if (conn.jumpHost) {
-    const jumpStr = conn.jumpUser ? `${conn.jumpUser}@${conn.jumpHost}` : conn.jumpHost;
-    cmd += ` -J ${jumpStr}${conn.jumpPort && conn.jumpPort !== 22 ? `:${conn.jumpPort}` : ''}`;
+    const jumpHost = assertHost(conn.jumpHost, 'jump host');
+    const jumpUser = conn.jumpUser ? assertUser(conn.jumpUser, 'jump user') + '@' : '';
+    const jumpPort = conn.jumpPort && conn.jumpPort !== 22 ? ':' + assertPort(conn.jumpPort, 'jump port') : '';
+    parts.push('-J', jumpUser + jumpHost + jumpPort);
   }
   conn.portForwards.filter(pf => pf.enabled).forEach(pf => {
-    if (pf.type === 'local') cmd += ` -L ${pf.localPort}:${pf.remoteHost}:${pf.remotePort}`;
-    if (pf.type === 'remote') cmd += ` -R ${pf.localPort}:${pf.remoteHost}:${pf.remotePort}`;
-    if (pf.type === 'dynamic') cmd += ` -D ${pf.localPort}`;
+    const local = assertPort(pf.localPort, 'forward port');
+    if (pf.type === 'dynamic') {
+      parts.push('-D', String(local));
+      return;
+    }
+    const spec = `${local}:${assertHost(pf.remoteHost, 'forward host')}:${assertPort(pf.remotePort, 'forward remote port')}`;
+    parts.push(pf.type === 'local' ? '-L' : '-R', spec);
   });
-  if (conn.timeout !== 30) cmd += ` -o ConnectTimeout=${conn.timeout}`;
-  if (conn.keepAliveInterval !== 60) cmd += ` -o ServerAliveInterval=${conn.keepAliveInterval}`;
-  cmd += ` ${conn.username}@${conn.host}`;
-  return cmd;
+  if (conn.timeout !== 30) parts.push('-o', `ConnectTimeout=${assertSeconds(conn.timeout, 'timeout')}`);
+  if (conn.keepAliveInterval !== 60) parts.push('-o', `ServerAliveInterval=${assertSeconds(conn.keepAliveInterval, 'keep-alive')}`);
+  parts.push(`${assertUser(conn.username)}@${assertHost(conn.host)}`);
+  return parts.join(' ');
+}
+
+export function generateSSHCommand(conn: SSHConnection, platform: Platform = 'windows'): string {
+  return safely(() => buildSSHCommand(conn, platform, false));
 }
 
 // ============ CROSS-PLATFORM TERMINAL LAUNCHERS ============
 
 export function generateTerminalLaunch(conn: SSHConnection, settings: AppSettings): string {
-  validateSSH(conn);
-  validateName(conn.name || 'SSH');
-  const sshCmd = generateSSHCommand(conn, settings.platform);
-  const platform = settings.platform;
-  const terminal = settings.preferredTerminal;
+  return safely(() => {
+    const platform = settings.platform;
+    const terminal = settings.preferredTerminal;
+    const title = safeLabel(conn.name);
+    const target = `${assertUser(conn.username)}@${assertHost(conn.host)}`;
+    const port = assertPort(conn.port);
+    // Launchers that embed the command inside another quoted string only accept plain arguments.
+    const nestedCmd = () => buildSSHCommand(conn, platform, true);
+    const plainCmd = () => buildSSHCommand(conn, platform, false);
 
-  switch (platform) {
-    case 'windows':
-      switch (terminal) {
-        case 'windows-terminal': return `wt new-tab --title "${conn.name}" ${sshCmd}`;
-        case 'powershell': return `powershell -NoExit -Command "${sshCmd}"`;
-        case 'cmd': return `cmd /k "${sshCmd}"`;
-        case 'putty': return generatePuTTYCommand(conn);
-        case 'mobaXterm': return `mobaxterm -ssh ${conn.username}@${conn.host} -p ${conn.port}`;
-        case 'tabby': return `tabby open ssh://${conn.username}@${conn.host}:${conn.port}`;
-        default: return sshCmd;
-      }
-    case 'macos':
-      switch (terminal) {
-        case 'iterm2': return `osascript -e 'tell application "iTerm2" to create window with default command "${sshCmd}"'`;
-        case 'terminal-app': return `osascript -e 'tell application "Terminal" to do script "${sshCmd}"'`;
-        case 'warp': return `warp --command "${sshCmd}"`;
-        case 'alacritty': return `alacritty -e ${sshCmd}`;
-        case 'tabby': return `tabby open ssh://${conn.username}@${conn.host}:${conn.port}`;
-        default: return sshCmd;
-      }
-    case 'linux':
-      switch (terminal) {
-        case 'gnome-terminal': return `gnome-terminal --title="${conn.name}" -- ${sshCmd}`;
-        case 'konsole': return `konsole --title "${conn.name}" -e ${sshCmd}`;
-        case 'xfce4-terminal': return `xfce4-terminal --title="${conn.name}" -x ${sshCmd}`;
-        case 'tilix': return `tilix --title="${conn.name}" -e ${sshCmd}`;
-        case 'alacritty-linux': return `alacritty --title "${conn.name}" -e ${sshCmd}`;
-        case 'tabby-linux': return `tabby open ssh://${conn.username}@${conn.host}:${conn.port}`;
-        default: return sshCmd;
-      }
-  }
+    switch (platform) {
+      case 'windows':
+        switch (terminal) {
+          case 'windows-terminal': return `wt new-tab --title "${title}" ${plainCmd()}`;
+          case 'powershell': return `powershell -NoExit -Command "${nestedCmd()}"`;
+          case 'cmd': return `cmd /k "${nestedCmd()}"`;
+          case 'putty': return buildPuTTYCommand(conn);
+          case 'mobaXterm': return `mobaxterm -ssh ${target} -p ${port}`;
+          case 'tabby': return `tabby open ssh://${target}:${port}`;
+          default: return plainCmd();
+        }
+      case 'macos':
+        switch (terminal) {
+          case 'iterm2': return `osascript -e 'tell application "iTerm2" to create window with default command "${nestedCmd()}"'`;
+          case 'terminal-app': return `osascript -e 'tell application "Terminal" to do script "${nestedCmd()}"'`;
+          case 'warp': return `warp --command "${nestedCmd()}"`;
+          case 'alacritty': return `alacritty -e ${plainCmd()}`;
+          case 'tabby': return `tabby open ssh://${target}:${port}`;
+          default: return plainCmd();
+        }
+      case 'linux':
+        switch (terminal) {
+          case 'gnome-terminal': return `gnome-terminal --title="${title}" -- ${plainCmd()}`;
+          case 'konsole': return `konsole --title "${title}" -e ${plainCmd()}`;
+          case 'xfce4-terminal': return `xfce4-terminal --title="${title}" -x ${plainCmd()}`;
+          case 'tilix': return `tilix --title="${title}" -e ${plainCmd()}`;
+          case 'alacritty-linux': return `alacritty --title "${title}" -e ${plainCmd()}`;
+          case 'tabby-linux': return `tabby open ssh://${target}:${port}`;
+          default: return plainCmd();
+        }
+    }
+  });
 }
 
 // ============ CROSS-PLATFORM FILE TRANSFER ============
 
+function remoteSpec(conn: SSHConnection, remotePath: string): string {
+  return `${assertUser(conn.username)}@${assertHost(conn.host)}:${assertRemotePath(remotePath)}`;
+}
+
 export function generateSCPCommand(conn: SSHConnection, localPath: string, remotePath: string, direction: 'upload' | 'download', platform: Platform = 'windows'): string {
-  validateSSH(conn);
-  validateTransferPath(localPath);
-  validateTransferPath(remotePath);
-  const host = `${conn.username}@${conn.host}`;
-  const portFlag = conn.port !== 22 ? `-P ${conn.port}` : '';
-  const keyFlag = conn.authType === 'key' && conn.keyPath ? `-i "${conn.keyPath}"` : '';
-  if (direction === 'upload') {
-    return `scp ${portFlag} ${keyFlag} "${localPath}" ${host}:${remotePath}`.replace(/\s+/g, ' ').trim();
-  }
-  return `scp ${portFlag} ${keyFlag} ${host}:${remotePath} "${localPath}"`.replace(/\s+/g, ' ').trim();
+  return safely(() => {
+    const args = ['scp'];
+    if (conn.port !== 22) args.push('-P', String(assertPort(conn.port)));
+    if (conn.authType === 'key' && conn.keyPath) args.push('-i', quotePath(platform, conn.keyPath));
+    args.push('--');
+    const local = quotePath(platform, localPath);
+    const remote = quoteArg(platform, remoteSpec(conn, remotePath));
+    return [...args, ...(direction === 'upload' ? [local, remote] : [remote, local])].join(' ');
+  });
 }
 
 export function generateRsyncCommand(conn: SSHConnection, localPath: string, remotePath: string, direction: 'upload' | 'download', platform: Platform = 'windows'): string {
-  validateSSH(conn);
-  validateTransferPath(localPath);
-  validateTransferPath(remotePath);
-  const host = `${conn.username}@${conn.host}`;
-  const sshCmd = `ssh -p ${conn.port}${conn.authType === 'key' && conn.keyPath ? ` -i "${conn.keyPath}"` : ''}`;
-  if (direction === 'upload') {
-    return `rsync -avz -e "${sshCmd}" "${localPath}" ${host}:${remotePath}`;
-  }
-  return `rsync -avz -e "${sshCmd}" ${host}:${remotePath} "${localPath}"`;
+  return safely(() => {
+    const inner = ['ssh', '-p', String(assertPort(conn.port))];
+    if (conn.authType === 'key' && conn.keyPath) inner.push('-i', quotePath(platform, conn.keyPath, true));
+    const rshArg = quoteArg(platform, inner.join(' '));
+    const local = quotePath(platform, localPath);
+    const remote = quoteArg(platform, remoteSpec(conn, remotePath));
+    const operands = direction === 'upload' ? [local, remote] : [remote, local];
+    return ['rsync', '-avz', '-e', rshArg, '--', ...operands].join(' ');
+  });
 }
 
 export function generateZmodemCommand(conn: SSHConnection): string {
-  validateSSH(conn);
-  return `ssh -o "Protocol=2" ${conn.username}@${conn.host} -t "rz -be"`;
+  return safely(() => `ssh -o Protocol=2 ${assertUser(conn.username)}@${assertHost(conn.host)} -t "rz -be"`);
 }
 
 // ============ CROSS-PLATFORM RDP/VNC ============
 
 export function generateRDPCommand(conn: SSHConnection, platform: Platform = 'windows'): string {
-  validateSSH(conn);
-  switch (platform) {
-    case 'windows':
-      return `mstsc /v:${conn.host}:${conn.port} /u:${conn.username}`;
-    case 'macos':
-      return `open "rdp://full address=s:${conn.host}:${conn.port}&username=s:${conn.username}"`;
-    case 'linux':
-      return `xfreerdp /v:${conn.host}:${conn.port} /u:${conn.username} /dynamic-resolution`;
-  }
+  return safely(() => {
+    const host = assertHost(conn.host);
+    const port = assertPort(conn.port);
+    const user = conn.username ? assertUser(conn.username) : '';
+    switch (platform) {
+      case 'windows':
+        return `mstsc /v:${host}:${port}` + (user ? ` /u:${user}` : '');
+      case 'macos':
+        return `open "rdp://full address=s:${host}:${port}` + (user ? `&username=s:${user}` : '') + '"';
+      case 'linux':
+        return `xfreerdp /v:${host}:${port}` + (user ? ` /u:${user}` : '') + ' /dynamic-resolution';
+    }
+  });
 }
 
 export function generateVNCCommand(conn: SSHConnection, platform: Platform = 'windows'): string {
-  validateSSH(conn);
-  const vncUrl = `vnc://${conn.username ? `${conn.username}@` : ''}${conn.host}:${conn.vncPort || 5900}`;
-  switch (platform) {
-    case 'windows':
-      return `start "" "${vncUrl}"  # Requires VNC client`;
-    case 'macos':
-      return `open "${vncUrl}"  # Uses built-in Screen Sharing`;
-    case 'linux':
-      return `vinagre ${vncUrl}  # Or: remmina --protocol=vnc --server=${conn.host}`;
-  }
+  return safely(() => {
+    const host = assertHost(conn.host);
+    const user = conn.username ? assertUser(conn.username) + '@' : '';
+    const vncUrl = `vnc://${user}${host}:${assertPort(conn.vncPort || 5900, 'VNC port')}`;
+    switch (platform) {
+      case 'windows':
+        return `start "" "${vncUrl}"  # Requires VNC client`;
+      case 'macos':
+        return `open "${vncUrl}"  # Uses built-in Screen Sharing`;
+      case 'linux':
+        return `vinagre ${vncUrl}  # Or: remmina --protocol=vnc --server=${host}`;
+    }
+  });
 }
 
 // ============ CROSS-PLATFORM PUTTY ============
 
-export function generatePuTTYCommand(conn: SSHConnection): string {
-  validateSSH(conn);
-  let cmd = 'putty';
-  if (conn.port !== 22) cmd += ` -P ${conn.port}`;
+function buildPuTTYCommand(conn: SSHConnection): string {
+  const parts = ['putty'];
+  if (conn.port !== 22) parts.push('-P', String(assertPort(conn.port)));
   if (conn.authType === 'key' && conn.keyPath) {
     // Convert OpenSSH key to PuTTY format path
     const ppkPath = conn.keyPath.replace(/\.(pem|key)$/, '.ppk');
-    cmd += ` -i "${ppkPath}"`;
+    parts.push('-i', quotePath('windows', ppkPath));
   }
-  cmd += ` ${conn.username}@${conn.host}`;
-  return cmd;
+  parts.push(`${assertUser(conn.username)}@${assertHost(conn.host)}`);
+  return parts.join(' ');
+}
+
+export function generatePuTTYCommand(conn: SSHConnection): string {
+  return safely(() => buildPuTTYCommand(conn));
 }
 
 // ============ CROSS-PLATFORM BATCH SCRIPTS ============
 
+function scriptLine(conn: SSHConnection, platform: Platform, wrap: (title: string, cmd: string) => string): string {
+  // Evaluate the nested launcher command under the refusal guard too.
+  const cmd = safely(() => buildSSHCommand(conn, platform, true));
+  const title = safeLabel(conn.name);
+  return cmd.startsWith('# Refused:') ? cmd : wrap(title, cmd);
+}
+
 export function generateBatchScript(connections: SSHConnection[], platform: Platform = 'windows'): string {
-  connections.forEach(validateSSH);
-  connections.forEach(c => validateName(c.name || 'SSH'));
   if (platform === 'windows') {
     let script = '@echo off\r\n';
     script += 'REM Generated by SSH Manager Pro (Windows)\r\n';
     script += `REM Date: ${new Date().toLocaleDateString()}\r\n\r\n`;
     connections.forEach(conn => {
-      script += `echo Connecting to ${conn.name}...\r\n`;
-      script += `start "${conn.name}" cmd /k "${generateSSHCommand(conn, 'windows')}"\r\n\r\n`;
+      script += `echo Connecting to ${safeLabel(conn.name)}...\r\n`;
+      const line = scriptLine(conn, 'windows', (title, cmd) => `start "${title}" cmd /k "${cmd}"`);
+      script += line.replace(/\r?\n/g, ' ').replace(/^#/, 'REM') + '\r\n\r\n';
     });
     script += 'echo All connections launched!\r\npause\r\n';
     return script;
@@ -264,8 +280,8 @@ export function generateBatchScript(connections: SSHConnection[], platform: Plat
     script += '# Generated by SSH Manager Pro (macOS)\n';
     script += `# Date: ${new Date().toLocaleDateString()}\n\n`;
     connections.forEach(conn => {
-      script += `echo "Connecting to ${conn.name}..."\n`;
-      script += `osascript -e 'tell application "Terminal" to do script "${generateSSHCommand(conn, 'macos')}"'\n\n`;
+      script += `echo "Connecting to ${safeLabel(conn.name)}..."\n`;
+      script += safely(() => `osascript -e 'tell application "Terminal" to do script "${buildSSHCommand(conn, 'macos', true)}"'`) + '\n\n';
     });
     return script;
   } else {
@@ -273,8 +289,8 @@ export function generateBatchScript(connections: SSHConnection[], platform: Plat
     script += '# Generated by SSH Manager Pro (Linux)\n';
     script += `# Date: ${new Date().toLocaleDateString()}\n\n`;
     connections.forEach(conn => {
-      script += `echo "Connecting to ${conn.name}..."\n`;
-      script += `gnome-terminal --title="${conn.name}" -- ${generateSSHCommand(conn, 'linux')} &\n\n`;
+      script += `echo "Connecting to ${safeLabel(conn.name)}..."\n`;
+      script += safely(() => `gnome-terminal --title="${safeLabel(conn.name)}" -- ${buildSSHCommand(conn, 'linux', false)} &`) + '\n\n';
     });
     script += 'echo "All connections launched!"\n';
     return script;
@@ -282,30 +298,27 @@ export function generateBatchScript(connections: SSHConnection[], platform: Plat
 }
 
 export function generatePowerShellScript(connections: SSHConnection[], platform: Platform = 'windows'): string {
-  connections.forEach(validateSSH);
-  connections.forEach(c => validateName(c.name || 'SSH'));
+  const header = (label: string, nl: string) => `# Generated by SSH Manager Pro (${label})${nl}# Date: ${new Date().toLocaleDateString()}${nl}${nl}`;
   if (platform === 'windows') {
-    let script = '# Generated by SSH Manager Pro (Windows PowerShell)\r\n';
-    script += `# Date: ${new Date().toLocaleDateString()}\r\n\r\n`;
+    let script = header('Windows PowerShell', '\r\n');
     connections.forEach(conn => {
-      script += `Write-Host "Connecting to ${conn.name}..." -ForegroundColor Cyan\r\n`;
-      script += `Start-Process wt -ArgumentList 'new-tab --title "${conn.name}" ${generateSSHCommand(conn, 'windows')}'\r\n\r\n`;
+      const title = safeLabel(conn.name);
+      script += `Write-Host "Connecting to ${title}..." -ForegroundColor Cyan\r\n`;
+      script += safely(() => `Start-Process wt -ArgumentList 'new-tab --title "${title}" ${buildSSHCommand(conn, 'windows', true)}'`) + '\r\n\r\n';
     });
     return script;
   } else if (platform === 'macos') {
-    let script = '# Generated by SSH Manager Pro (macOS PowerShell)\n';
-    script += `# Date: ${new Date().toLocaleDateString()}\n\n`;
+    let script = header('macOS PowerShell', '\n');
     connections.forEach(conn => {
-      script += `Write-Host "Connecting to ${conn.name}..." -ForegroundColor Cyan\n`;
-      script += `osascript -e 'tell application "iTerm2" to create window with default command "${generateSSHCommand(conn, 'macos')}"'\n\n`;
+      script += `Write-Host "Connecting to ${safeLabel(conn.name)}..." -ForegroundColor Cyan\n`;
+      script += safely(() => `osascript -e 'tell application "iTerm2" to create window with default command "${buildSSHCommand(conn, 'macos', true)}"'`) + '\n\n';
     });
     return script;
   } else {
-    let script = '# Generated by SSH Manager Pro (Linux PowerShell)\n';
-    script += `# Date: ${new Date().toLocaleDateString()}\n\n`;
+    let script = header('Linux PowerShell', '\n');
     connections.forEach(conn => {
-      script += `Write-Host "Connecting to ${conn.name}..." -ForegroundColor Cyan\n`;
-      script += `gnome-terminal --title="${conn.name}" -- ${generateSSHCommand(conn, 'linux')} &\n\n`;
+      script += `Write-Host "Connecting to ${safeLabel(conn.name)}..." -ForegroundColor Cyan\n`;
+      script += safely(() => `gnome-terminal --title="${safeLabel(conn.name)}" -- ${buildSSHCommand(conn, 'linux', false)} &`) + '\n\n';
     });
     return script;
   }
@@ -315,38 +328,52 @@ export function generatePowerShellScript(connections: SSHConnection[], platform:
 
 export function parseSSHConfig(config: string, platform: Platform = 'windows'): Partial<SSHConnection>[] {
   const results: Partial<SSHConnection>[] = [];
-  const lines = config.split('\n');
+  const lines = config.split(/\r?\n/);
   let current: Partial<SSHConnection> | null = null;
   const pInfo = PLATFORMS[platform];
+  const unquote = (v: string) => v.replace(/^"(.*)"$/, '$1');
+  const flush = () => { if (current && current.name) results.push(current); };
 
   for (const line of lines) {
     const trimmed = line.trim();
     if (!trimmed || trimmed.startsWith('#')) continue;
-    const match = trimmed.match(/^(\S+)\s+(.+)$/);
+    const match = trimmed.match(/^(\S+?)(?:\s*=\s*|\s+)(.+)$/);
     if (!match) continue;
-    const [, key, value] = match;
-    if (key.toLowerCase() === 'host') {
-      if (current && current.name) results.push(current);
-      current = { name: value, host: value, protocol: 'ssh' };
-    } else if (current) {
-      switch (key.toLowerCase()) {
-        case 'hostname': current.host = value; break;
-        case 'port': current.port = parseInt(value); break;
-        case 'user': current.username = value; break;
-        case 'identityfile':
-          current.keyPath = value.replace('~', pInfo.homeDir);
-          current.authType = 'key';
-          break;
+    const [, key, rawValue] = match;
+    const value = unquote(rawValue.trim());
+    switch (key.toLowerCase()) {
+      case 'host': {
+        flush();
+        // Only single, literal aliases become profiles; wildcard/negated/multi-pattern blocks are skipped.
+        current = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$/.test(value)
+          ? { name: value, host: value, protocol: 'ssh' }
+          : null;
+        break;
       }
+      case 'hostname': if (current && /^[A-Za-z0-9][A-Za-z0-9.:_-]{0,252}$/.test(value)) current.host = value; break;
+      case 'port': {
+        const port = Number(value);
+        if (current && Number.isInteger(port) && port >= 1 && port <= 65535) current.port = port;
+        break;
+      }
+      case 'user': if (current && /^[A-Za-z0-9_][A-Za-z0-9_.-]{0,63}$/.test(value)) current.username = value; break;
+      case 'identityfile':
+        if (current && !/[\r\n\0]/.test(value)) {
+          current.keyPath = value.replace(/^~/, pInfo.homeDir);
+          current.authType = 'key';
+        }
+        break;
     }
   }
-  if (current && current.name) results.push(current);
+  flush();
   return results;
 }
 
 // ============ CROSS-PLATFORM PACKAGE INSTALL COMMANDS ============
 
-export function generateInstallCommand(pkg: string, settings: AppSettings): string {
+export function generateInstallCommand(pkgInput: string, settings: AppSettings): string {
+  const pkg = safely(() => assertPackage(pkgInput));
+  if (pkg.startsWith('#')) return pkg;
   const pm = settings.packageManager;
   const commands: Record<string, string> = {
     winget: `winget install ${pkg}`,
@@ -364,13 +391,19 @@ export function generateInstallCommand(pkg: string, settings: AppSettings): stri
 // ============ CROSS-PLATFORM KEY GENERATION ============
 
 export function generateKeyGenCommand(keyType: 'ed25519' | 'rsa' | 'ecdsa', bits: number, comment: string, platform: Platform): string {
-  const pInfo = PLATFORMS[platform];
-  let cmd = `ssh-keygen -t ${keyType}`;
-  if (keyType === 'rsa') cmd += ` -b ${bits}`;
-  if (keyType === 'ecdsa') cmd += ` -b 521`;
-  cmd += ` -C "${comment || 'your@email.com'}"`;
-  cmd += ` -f ${pInfo.defaultKeyPath.replace('id_ed25519', `id_${keyType}`)}`;
-  return cmd;
+  return safely(() => {
+    const pInfo = PLATFORMS[platform];
+    if (!['ed25519', 'rsa', 'ecdsa'].includes(keyType)) throw new ShellSafetyError('Invalid key type');
+    let cmd = `ssh-keygen -t ${keyType}`;
+    if (keyType === 'rsa') {
+      if (![2048, 3072, 4096].includes(bits)) throw new ShellSafetyError('Invalid RSA key size');
+      cmd += ` -b ${bits}`;
+    }
+    if (keyType === 'ecdsa') cmd += ` -b 521`;
+    cmd += ` -C ${quoteArg(platform, comment || 'your@email.com')}`;
+    cmd += ` -f ${quotePath(platform, pInfo.defaultKeyPath.replace('id_ed25519', `id_${keyType}`))}`;
+    return cmd;
+  });
 }
 
 export function generateSSHAgentSetup(platform: Platform): string {
