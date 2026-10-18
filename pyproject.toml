@@ -25,7 +25,8 @@ Issues = "https://github.com/policedbc/zssh/issues"
 
 [project.scripts]
 zssh = "zssh:main"
+zfleet = "zfleet:main"
 
 [tool.setuptools]
-py-modules = ["zssh"]
+py-modules = ["zssh", "zfleet"]
 package-dir = { "" = "scripts" }

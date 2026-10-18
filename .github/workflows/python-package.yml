@@ -26,6 +26,7 @@ jobs:
           python -m twine check dist/*.whl dist/*.tar.gz --strict
           python -m pip install --force-reinstall --no-deps dist/*.whl
           zssh --help
+          zfleet --help
       - name: Verify no SSH private keys are included
         run: |
           python - <<'PY'
@@ -35,7 +36,7 @@ jobs:
           for wheel in glob.glob('dist/*.whl'):
               with zipfile.ZipFile(wheel) as archive:
                   names = archive.namelist()
-                  assert 'zssh.py' in names, names
+                  assert 'zssh.py' in names and 'zfleet.py' in names, names
                   assert not any(name.endswith(('id_rsa', 'id_ed25519', '.pem')) for name in names)
           for sdist in glob.glob('dist/*.tar.gz'):
               with tarfile.open(sdist, 'r:gz') as archive:
