@@ -37,6 +37,21 @@ npm ci && npm run typecheck && npm test && npm run build
 
 UI supports SSH/SCP command generation, terminal preferences and connection profiles; real native SSH execution is not yet wired into the browser UI.
 
+### Browser operation status
+
+The web UI is **command-preview and clipboard-only**. Its Connection, Batch and
+File Transfer actions do not open SSH sessions or transfer bytes; an operator
+must run the generated command in an authorized native terminal. SFTP and
+Zmodem need a native client and are not implemented in the browser.
+
+The Network Scanner page has no active scan backend and reports no host status.
+Fresh installations start with an empty profile list, without fictional
+production hosts. Prior versions populated sample hosts and fabricated Session,
+Transfer and Scan counts; **legacy counters must not be considered evidence**
+of device health, access, transfer completion, or security posture. Integrate
+real authenticated observations before feeding these values to zworkforce.
+
+
 ## zFleet — preview-first SSH operations
 
 Run the fleet tool from a trusted checkout after enrolling hosts with `zssh`.
