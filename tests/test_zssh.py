@@ -24,15 +24,35 @@ class BootstrapTests(unittest.TestCase):
                 Path(cmd[cmd.index("-f")+1]).write_text("private")
                 Path(cmd[cmd.index("-f")+1]+".pub").write_text("public")
                 return subprocess.CompletedProcess(cmd,0)
-            with patch.object(zssh.shutil,"which",return_value="/usr/bin/ssh"),patch.object(zssh.subprocess,"run",side_effect=fake_run) as run:
+            with patch.object(zssh.shutil,"which",return_value="/usr/bin/ssh"),patch.object(zssh.subprocess,"run",side_effect=fake_run) as run, patch.object(zssh,"verify_windows_key_acl") as verify_acl:
                 zssh.bootstrap(d)
                 zssh.bootstrap(d)
                 self.assertEqual(run.call_count,1)
+                if zssh.os.name == "nt": self.assertEqual(verify_acl.call_count,2)
             zssh.add_host("dev","dev.internal","ubuntu",home=d)
             content=zssh.paths(d)[3].read_text()
             self.assertIn("StrictHostKeyChecking yes",content)
             with self.assertRaises(ValueError):
                 zssh.add_host("dev","dev.internal","ubuntu",home=d)
+
+    def test_windows_acl_rejects_untrusted_principal(self):
+        with patch.object(zssh.subprocess, "run", return_value=subprocess.CompletedProcess([], 5)):
+            with self.assertRaises(RuntimeError):
+                zssh.verify_windows_key_acl(Path("id_ed25519"))
+
+    def test_windows_acl_rejects_unverifiable_acl(self):
+        with patch.object(zssh.subprocess, "run", side_effect=OSError("powershell unavailable")):
+            with self.assertRaises(OSError):
+                zssh.verify_windows_key_acl(Path("id_ed25519"))
+
+    def test_public_key_exists_without_private_key(self):
+        with tempfile.TemporaryDirectory() as d:
+            key = zssh.key_path(d)
+            key.parent.mkdir(parents=True)
+            Path(str(key) + ".pub").write_text("orphan")
+            with patch.object(zssh.shutil, "which", return_value="/usr/bin/ssh"):
+                with self.assertRaises(RuntimeError):
+                    zssh.bootstrap(d)
 
     def test_rejects_command_injection(self):
         with tempfile.TemporaryDirectory() as d:

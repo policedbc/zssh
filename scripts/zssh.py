@@ -29,6 +29,22 @@ def ensure_directory(path):
 def key_path(home=None):
     return paths(home)[1] / "id_ed25519"
 
+def verify_windows_key_acl(key):
+    """Reject keys with access permissions outside current user, SYSTEM or Administrators."""
+    script = (
+        "$ErrorActionPreference='Stop';"
+        "$acl=Get-Acl -LiteralPath $args[0];"
+        "$me=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value;"
+        "$allowed=@($me,'S-1-5-18','S-1-5-32-544');"
+        "foreach($ace in $acl.Access){"
+        "$sid=$ace.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value;"
+        "if($ace.AccessControlType -eq 'Allow' -and $sid -notin $allowed){exit 5}"
+        "};exit 0"
+    )
+    result = subprocess.run(["powershell","-NoProfile","-NonInteractive","-Command",script,str(key)],capture_output=True,text=True)
+    if result.returncode:
+        raise RuntimeError("Windows key ACL is unsafe or cannot be verified")
+
 def bootstrap(home=None, dry_run=False, comment=None):
     ssh, managed, config, hosts = paths(home)
     key = key_path(home)
@@ -45,12 +61,14 @@ def bootstrap(home=None, dry_run=False, comment=None):
     ensure_directory(ssh)
     ensure_directory(managed)
     if not key.exists():
-        if (key.with_suffix(".pub")).exists():
+        if Path(str(key) + ".pub").exists():
             raise RuntimeError("Public key exists without its private counterpart; refusing overwrite")
         cmd = ["ssh-keygen","-q","-t","ed25519","-a","64","-f",str(key),"-C",comment or ("zssh@" + socket.gethostname())]
         # Interactive passphrase by default: do not set -N "".
         subprocess.run(cmd, check=True)
     lock_down(key)
+    if os.name == "nt":
+        verify_windows_key_acl(key)
     if not hosts.exists():
         hosts.write_text("# Managed by zSSH. Do not store passwords here.\n",encoding="utf-8")
     lock_down(hosts)
