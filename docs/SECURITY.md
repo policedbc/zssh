@@ -16,3 +16,6 @@
 - JSON/SSH-config imports keep only known fields, drop stored secrets, and reject invalid host/user/port values.
 - `zfleet` is preview-only unless `--execute` is passed; it requires explicit host selection, and fleet-wide execution requires `--confirm-all`. It never uses a local shell and always requests `BatchMode=yes` and `StrictHostKeyChecking=yes`; the remote command is still interpreted by the remote shell, so review it carefully. It is not an autonomous agent policy engine.
 - Imported startup commands, environment variables and custom terminal commands are dropped. SCP/rsync remote paths are restricted to simple paths because remote shells may parse those values again.
+- The browser now only prepares and copies connection, batch and SCP/rsync transfer commands; clipboard success does not mean a host connected or a file moved.
+- The Network Scanner is disabled until an authorized native scanner is integrated. No random ports or sample production hosts are presented as actual observations.
+- Older versions generated fictitious connection/session counts and transfer results. Treat persisted legacy counters and status data as unverified, and do not feed them to automation or monitoring systems.
